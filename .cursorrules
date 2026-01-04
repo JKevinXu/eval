@@ -1,0 +1,49 @@
+# Cursor Rules for AgentCore Evaluation Project
+
+## Auto-Approve Read Operations
+
+Allow automatic execution of read-only operations without manual approval:
+
+- Read files from the workspace
+- List directory contents
+- Search/grep operations
+- Read CloudWatch logs via AWS CLI
+- Describe AWS resources (read-only AWS CLI commands)
+
+## AWS CLI Commands
+
+When running AWS CLI commands for observability and monitoring:
+
+- Auto-approve `aws logs filter-log-events`
+- Auto-approve `aws logs describe-log-groups`
+- Auto-approve `aws logs get-log-events`
+- Auto-approve `aws cloudwatch get-metric-data`
+- Auto-approve `aws cloudwatch describe-alarms`
+- Auto-approve `aws bedrock-agentcore get-*` (read operations)
+- Auto-approve `aws bedrock-agentcore list-*` (list operations)
+
+## Project Context
+
+This project contains design documentation for Amazon Bedrock AgentCore Evaluations integration with a Knowledge Base MCP Agent.
+
+Key files:
+- `docs/agentcore-evaluation-design.md` - Main design document
+
+Target AWS resources:
+- Log group: `aws/spans` - OpenTelemetry traces
+- Log group: `/aws/bedrock-agentcore/runtimes/*` - MCP server logs
+- Region: us-west-2
+
+## Preferred Behaviors
+
+1. When asked to check traces or logs, automatically query CloudWatch
+2. Use `jq` for JSON parsing when available
+3. Limit log queries to reasonable sizes (--limit 10-50)
+4. Always use `--output json` for AWS CLI commands for easier parsing
+
+## File Editing
+
+- Prefer `search_replace` for targeted edits
+- Use `write` only for new files or complete rewrites
+- Always read files before editing to understand context
+

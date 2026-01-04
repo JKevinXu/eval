@@ -248,6 +248,91 @@ def apply_access_filter(user_role: str, department: str):
 
 ---
 
+## Implementation Notes
+
+### Existing CloudWatch Log Groups (Discovered)
+
+The following AgentCore log groups are available in the target AWS account:
+
+| Log Group | Purpose | Size |
+|-----------|---------|------|
+| `aws/spans` | OpenTelemetry traces with gen_ai attributes | ~464KB |
+| `/aws/bedrock-agentcore/runtimes/mcp_server_ac-BfnedS21lC-DEFAULT` | MCP server runtime logs | ~47MB |
+| `/aws/bedrock-agentcore/runtimes/mcp_server-7f96SDCezH-DEFAULT` | MCP server logs | ~18MB |
+| `/aws/bedrock-agentcore/runtimes/langgraph_agent-1NyH76Cfc7-DEFAULT` | LangGraph agent logs | ~1.4MB |
+
+### Actual Trace Schema (from `aws/spans`)
+
+The traces use **OpenTelemetry format** with AgentCore-specific semantic conventions:
+
+```json
+{
+  "resource": {
+    "attributes": {
+      "service.name": "langgraph_agent.DEFAULT",
+      "cloud.platform": "aws_bedrock_agentcore",
+      "cloud.resource_id": "arn:aws:bedrock-agentcore:us-west-2:313117444016:runtime/...",
+      "aws.service.type": "gen_ai_agent",
+      "telemetry.sdk.name": "opentelemetry",
+      "telemetry.sdk.version": "1.33.1"
+    }
+  },
+  "traceId": "693450f70706ee542404439f03c99a12",
+  "spanId": "e6b23d1a2e6ddadc",
+  "parentSpanId": "ddd354c4fb6e4656",
+  "name": "chat us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+  "kind": "CLIENT",
+  "startTimeUnixNano": 1765036280876512050,
+  "endTimeUnixNano": 1765036282425105992,
+  "durationNano": 1548593942,
+  "attributes": {
+    "aws.remote.operation": "InvokeModel",
+    "gen_ai.request.model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "gen_ai.request.max_tokens": 1024,
+    "gen_ai.request.temperature": 0.7,
+    "gen_ai.usage.input_tokens": 1086,
+    "gen_ai.usage.output_tokens": 65,
+    "gen_ai.response.finish_reasons": ["tool_use"],
+    "gen_ai.memory.id": "langgraph_agent_mem-o5nDQxAbkB",
+    "session.id": "test-token-stream-12345678901234567890",
+    "http.status_code": 200
+  },
+  "status": { "code": "UNSET" }
+}
+```
+
+### Key Fields for Evaluation
+
+| Field | Location | Use in Evaluation |
+|-------|----------|-------------------|
+| `traceId` | Root | Correlate spans within a request |
+| `session.id` | `attributes` | Session-level evaluation scope |
+| `gen_ai.request.model` | `attributes` | Model performance comparison |
+| `gen_ai.usage.*` | `attributes` | Cost and efficiency metrics |
+| `gen_ai.response.finish_reasons` | `attributes` | Completion status analysis |
+| `durationNano` | Root | Latency monitoring |
+| `name` | Root | Operation identification |
+
+### Query Examples
+
+**Get recent traces:**
+```bash
+aws logs filter-log-events \
+  --log-group-name "aws/spans" \
+  --limit 10 \
+  --output json
+```
+
+**Filter by gen_ai operations:**
+```bash
+aws logs filter-log-events \
+  --log-group-name "aws/spans" \
+  --filter-pattern "gen_ai" \
+  --limit 10
+```
+
+---
+
 ## References
 
 - [AWS Blog: AgentCore Evaluations Announcement](https://aws.amazon.com/blogs/aws/amazon-bedrock-agentcore-adds-quality-evaluations-and-policy-controls-for-deploying-trusted-ai-agents/)
