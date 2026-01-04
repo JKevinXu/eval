@@ -4,10 +4,31 @@
 
 - **Purpose**: Continuous quality monitoring of the KB MCP agent in production
 - **Key objectives**: Ensure retrieval accuracy, response faithfulness, and user helpfulness
+- **Target System**: [knowledgeDB](https://github.com/JKevinXu/knowledgeDB) - Amazon Bedrock Knowledge Base with metadata filtering
 
 ---
 
-## Architecture - MCP Endpoint Integration
+## Gateway Auto-Integration (Recommended)
+
+When MCP servers are integrated through AgentCore Gateway, **observability is automatic** - no custom instrumentation required.
+
+### What Gateway Provides Automatically
+
+| Feature | Status | Manual Work |
+|---------|--------|-------------|
+| Usage metrics | Built-in | None |
+| Invocation metrics | Built-in | None |
+| Performance metrics | Built-in | None |
+| Error rates | Built-in | None |
+| CloudWatch integration | Built-in | None |
+| OpenTelemetry format | Built-in | None |
+| Custom spans/metrics | Optional | ADOT SDK |
+
+**Reference**: [AgentCore Observability Configuration](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)
+
+---
+
+## Architecture
 
 ```mermaid
 flowchart TB
@@ -15,40 +36,43 @@ flowchart TB
         UserApp[User Application]
     end
     
-    subgraph agentcore [AgentCore Services]
+    subgraph agentcore [AgentCore Services - Auto Integration]
         Gateway[AgentCore Gateway]
-        Observability[Observability]
+        Observability[Observability - AUTO]
         Evaluations[Evaluations Service]
     end
     
-    subgraph mcp [Your MCP Agent]
-        MCPEndpoint[MCP Server Endpoint]
-        KBTools[KB Tools]
-        KnowledgeBase[(Knowledge Base)]
+    subgraph knowledgedb [knowledgeDB MCP Server]
+        MCPEndpoint[MCP Server]
+        RetrieveTool[knowledge_base_retrieve]
+        FilterTool[apply_metadata_filters]
     end
     
-    subgraph monitoring [Monitoring]
-        CloudWatch[CloudWatch]
+    subgraph aws [AWS Services]
+        BedrockKB[Bedrock Knowledge Base]
+        OpenSearch[OpenSearch Serverless]
+        S3[(S3 Documents)]
+    end
+    
+    subgraph monitoring [CloudWatch]
+        Metrics[Built-in Metrics]
+        Logs[Traces/Logs]
         Alarms[Alarms]
     end
     
     UserApp --> Gateway
-    Gateway -->|"Intercepts tool calls"| MCPEndpoint
-    MCPEndpoint --> KBTools --> KnowledgeBase
-    Gateway -->|"Emits traces"| Observability
-    Observability --> CloudWatch
-    Evaluations -->|"Samples from"| CloudWatch
-    CloudWatch --> Alarms
+    Gateway --> MCPEndpoint
+    MCPEndpoint --> RetrieveTool --> BedrockKB
+    MCPEndpoint --> FilterTool
+    BedrockKB --> OpenSearch --> S3
+    Gateway -->|"Auto-emits"| Observability
+    Observability --> Metrics
+    Observability --> Logs
+    Evaluations -->|"Samples from"| Logs
+    Metrics --> Alarms
 ```
 
-### MCP Integration Options
-
-| Option | Description | When to Use |
-|--------|-------------|-------------|
-| **A: AgentCore Gateway** | Route MCP through Gateway; auto-captures traces | New deployments, need Policy controls |
-| **B: CloudWatch Logs** | Agent logs to CloudWatch; Evaluations samples from logs | Existing MCP deployments |
-
-### MCP Server Requirements (for Gateway integration)
+### MCP Server Requirements (for Gateway)
 
 - OAuth authentication (client ID, client secret, discovery URL)
 - Tool capabilities support
@@ -58,9 +82,9 @@ flowchart TB
 
 ---
 
-## Log Schema (Official AgentCore Observability Format)
+## Log Schema (Auto-captured by Gateway)
 
-AgentCore Observability captures structured logs with these fields:
+AgentCore Observability automatically captures structured logs:
 
 ```json
 {
@@ -72,10 +96,14 @@ AgentCore Observability captures structured logs with these fields:
   "session_id": "session-uuid",
   "trace_id": "trace-uuid",
   "span_id": "span-uuid",
-  "service_name": "kb-mcp-agent",
-  "operation": "knowledge_base_search",
+  "service_name": "knowledgedb-mcp",
+  "operation": "knowledge_base_retrieve",
   "request_payload": {
-    "query": "What is the refund policy?"
+    "query": "What is the refund policy?",
+    "filters": {
+      "department": "finance",
+      "accessLevel": "internal"
+    }
   },
   "response_payload": {
     "response": "The refund policy states...",
@@ -88,7 +116,7 @@ AgentCore Observability captures structured logs with these fields:
 
 ---
 
-## Built-in Evaluators Selection
+## Built-in Evaluators
 
 | Evaluator | Purpose | Priority |
 |-----------|---------|----------|
@@ -101,24 +129,26 @@ AgentCore Observability captures structured logs with these fields:
 
 ---
 
-## Custom Evaluators for KB Agent
+## Custom Evaluators for knowledgeDB
 
-Design custom evaluators specific to knowledge base use cases:
+Design custom evaluators specific to the knowledgeDB access control features:
 
-1. **Retrieval Relevance** - Are retrieved docs relevant to query?
-2. **Citation Accuracy** - Are sources correctly attributed?
-3. **Knowledge Coverage** - Does response fully address query?
-4. **Hallucination Detection** - Claims unsupported by context?
+| Evaluator | Purpose | Prompt Template |
+|-----------|---------|-----------------|
+| **Access Compliance** | Verify response respects accessLevel restrictions | "Did the response only include documents matching the user's accessLevel and allowedRoles metadata?" |
+| **Metadata Filter Accuracy** | Validate correct filters applied | "Were the correct department and accessLevel filters applied based on user context?" |
+| **Retrieval Relevance** | Check retrieved docs match query | "Rate 1-5 how relevant the retrieved documents are to the query." |
+| **Citation Accuracy** | Verify sources are attributed | "Are document sources correctly cited in the response?" |
 
 ### Custom Evaluator Configuration
 
-In the AgentCore Console, custom evaluators require:
+In the AgentCore Console:
 
-- **Model**: The LLM to use as a judge (e.g., Claude, GPT-4)
-- **Inference Parameters**: Temperature, max output tokens
-- **Judging Prompt**: Instructions for scoring
-- **Scale**: Numeric values or custom text labels
-- **Scope**: Single traces, full sessions, or per tool call
+- **Model**: Claude 3.5 Sonnet or similar
+- **Inference Parameters**: Temperature 0.0, max tokens 256
+- **Judging Prompt**: See templates above
+- **Scale**: 1-5 numeric or Pass/Fail labels
+- **Scope**: Per tool call (for filter accuracy) or per trace (for response quality)
 
 ---
 
@@ -130,67 +160,100 @@ In the AgentCore Console, custom evaluators require:
 | Staging | 100% | Full coverage before deploy |
 | Testing | 100% | Regression detection |
 
-### Filters
-
-- By user segment
-- By query type
-- By topic domain
-
 ---
 
 ## Alerting Thresholds
-
-Define CloudWatch alarms for quality degradation:
 
 | Metric | Warning | Critical |
 |--------|---------|----------|
 | Faithfulness | < 0.85 (8hr avg) | < 0.75 (1hr avg) |
 | Correctness | < 0.80 (8hr avg) | < 0.70 (1hr avg) |
 | Helpfulness | < 0.75 (24hr avg) | < 0.60 (4hr avg) |
+| Access Compliance | < 0.95 (1hr avg) | < 0.90 (15min avg) |
+
+### CloudWatch Alarm Example
+
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name "KB-Faithfulness-Low" \
+  --metric-name "FaithfulnessScore" \
+  --namespace "AgentCore/Evaluations" \
+  --threshold 0.75 \
+  --comparison-operator LessThanThreshold \
+  --evaluation-periods 2 \
+  --period 3600 \
+  --statistic Average
+```
 
 ---
 
 ## Implementation Steps
 
-1. **Deploy MCP agent using AgentCore Runtime**
-   - Build Docker container and push to Amazon ECR
-   - Configure OAuth authentication
-   - Use AgentCore CLI to create runtime
-   - [Guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
+### Step 1: Enable Observability on Gateway
 
-2. **Integrate with AgentCore Gateway**
-   - Register MCP server tools with Gateway
-   - Configure OAuth settings
-   - Test integration
-   - [Docs](https://docs.aws.amazon.com/marketplace/latest/userguide/bedrock-agentcore-gateway.html)
+```bash
+aws bedrock-agentcore update-gateway \
+  --gateway-id <your-gateway-id> \
+  --observability-config '{"enabled": true}'
+```
 
-3. **Enable Observability**
-   - Enable observability on agent resource
-   - Configure log destinations (CloudWatch Logs, S3, or Firehose)
-   - [Guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html)
+### Step 2: Create Online Evaluation
 
-4. **Create online evaluation in AgentCore Console**
-   - Navigate to Evaluations > Create online evaluation
-   - Select data source (AgentCore endpoint or CloudWatch log group)
-   - Configure sampling rate and filters
+1. Navigate to **AgentCore Console** > **Evaluations**
+2. Click **Create online evaluation**
+3. **Data source**: Select your AgentCore Gateway endpoint
+4. **Evaluators**: Enable Faithfulness, Correctness, Helpfulness, Tool Selection
+5. **Sampling rate**: 20% for production
+6. Click **Create**
 
-5. **Configure built-in + custom evaluators**
-   - Select built-in evaluators (Faithfulness, Correctness, Helpfulness)
-   - Create custom evaluators for KB-specific metrics
-   - Define scoring scales and prompts
+### Step 3: Add Custom Evaluators
 
-6. **Set up CloudWatch dashboards and alarms**
-   - Create dashboard for evaluation metrics
-   - Configure alarms with thresholds defined above
-   - Set up SNS notifications for alerts
+1. In Evaluations, click **Create custom evaluator**
+2. Configure Access Compliance evaluator:
+   - Model: Claude 3.5 Sonnet
+   - Prompt: "Did the response only include documents matching the user's accessLevel?"
+   - Scale: Pass/Fail
+   - Scope: Per trace
+3. Repeat for Metadata Filter Accuracy
+
+### Step 4: Set Up Dashboards and Alarms
+
+1. Navigate to **CloudWatch** > **Dashboards**
+2. Create dashboard with AgentCore/Evaluations metrics
+3. Add alarms for threshold breaches
+4. Configure SNS notifications
+
+---
+
+## Optional: Enhanced Instrumentation with ADOT SDK
+
+If you need custom metrics beyond Gateway defaults:
+
+```python
+from aws_opentelemetry_distro import start_tracing
+from opentelemetry import trace
+
+# Initialize ADOT
+start_tracing(service_name="knowledgedb-mcp")
+tracer = trace.get_tracer("knowledgedb")
+
+@tracer.start_as_current_span("apply_access_filter")
+def apply_access_filter(user_role: str, department: str):
+    span = trace.get_current_span()
+    span.set_attribute("user.role", user_role)
+    span.set_attribute("user.department", department)
+    # Your existing code
+    pass
+```
 
 ---
 
 ## References
 
 - [AWS Blog: AgentCore Evaluations Announcement](https://aws.amazon.com/blogs/aws/amazon-bedrock-agentcore-adds-quality-evaluations-and-policy-controls-for-deploying-trusted-ai-agents/)
+- [AgentCore Gateway Blog](https://aws.amazon.com/blogs/machine-learning/introducing-amazon-bedrock-agentcore-gateway-transforming-enterprise-ai-agent-tool-development/)
 - [AgentCore Runtime MCP Deployment](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
 - [AgentCore Gateway Integration](https://docs.aws.amazon.com/marketplace/latest/userguide/bedrock-agentcore-gateway.html)
-- [AgentCore Observability Guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html)
+- [AgentCore Observability Configuration](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-configure.html)
 - [AgentCore Observability Metrics](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-tool-metrics.html)
-
+- [knowledgeDB Repository](https://github.com/JKevinXu/knowledgeDB)
