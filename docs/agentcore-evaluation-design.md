@@ -84,7 +84,11 @@ flowchart TB
 
 ## Log Schema (Auto-captured by Gateway)
 
-AgentCore Observability automatically captures structured logs:
+AgentCore Observability automatically captures structured logs in OpenTelemetry format.
+
+> **Note**: The schema below represents the **expected format** for knowledgeDB evaluation. Current auto-instrumentation captures operational metadata (tokens, latency, tool names) but may not include content fields (`request_payload`, `response_payload`) without custom instrumentation. See [Trace Data Requirements](#trace-data-requirements-for-evaluation) for details.
+
+**Expected Schema for knowledgeDB:**
 
 ```json
 {
@@ -248,87 +252,85 @@ def apply_access_filter(user_role: str, department: str):
 
 ---
 
-## Implementation Notes
+## Trace Data Requirements for Evaluation
 
-### Existing CloudWatch Log Groups (Discovered)
+LLM-as-judge evaluations require specific content in traces beyond operational metadata. This section documents what data must be captured for each knowledgeDB evaluator to function.
 
-The following AgentCore log groups are available in the target AWS account:
+### Required Data by Evaluator
 
-| Log Group | Purpose | Size |
-|-----------|---------|------|
-| `aws/spans` | OpenTelemetry traces with gen_ai attributes | ~464KB |
-| `/aws/bedrock-agentcore/runtimes/mcp_server_ac-BfnedS21lC-DEFAULT` | MCP server runtime logs | ~47MB |
-| `/aws/bedrock-agentcore/runtimes/mcp_server-7f96SDCezH-DEFAULT` | MCP server logs | ~18MB |
-| `/aws/bedrock-agentcore/runtimes/langgraph_agent-1NyH76Cfc7-DEFAULT` | LangGraph agent logs | ~1.4MB |
+| Evaluator | Required Trace Data | Source |
+|-----------|---------------------|--------|
+| **Faithfulness** | LLM response text, retrieved document content | `response_payload.response`, `response_payload.retrieved_documents` |
+| **Correctness** | LLM response text | `response_payload.response` |
+| **Helpfulness** | User query, LLM response text | `request_payload.query`, `response_payload.response` |
+| **Access Compliance** | Applied metadata filters, retrieved documents, user context | `request_payload.filters`, `response_payload.retrieved_documents` |
+| **Metadata Filter Accuracy** | Requested filters, actually applied filters | `request_payload.filters` |
+| **Retrieval Relevance** | User query, retrieved documents with scores | `request_payload.query`, `response_payload.retrieved_documents` |
+| **Citation Accuracy** | LLM response, source document references | `response_payload.response`, `response_payload.retrieved_documents` |
+| **Tool Selection Accuracy** | User query, selected tool name | `request_payload.query`, `operation` |
+| **Tool Parameter Accuracy** | User query, extracted parameters | `request_payload.query`, `request_payload.filters` |
 
-### Actual Trace Schema (from `aws/spans`)
+### Expected Span Types for knowledgeDB
 
-The traces use **OpenTelemetry format** with AgentCore-specific semantic conventions:
+| Span Name | Expected Attributes | Purpose |
+|-----------|---------------------|---------|
+| `knowledge_base_retrieve` | `request_payload.query`, `request_payload.filters`, `response_payload.retrieved_documents` | Main retrieval operation |
+| `apply_metadata_filters` | `user.role`, `user.department`, `user.accessLevel`, `filters.applied` | Access control filtering |
+| `generate_response` | `gen_ai.prompt.content`, `gen_ai.completion.content` | LLM response generation |
 
-```json
-{
-  "resource": {
-    "attributes": {
-      "service.name": "langgraph_agent.DEFAULT",
-      "cloud.platform": "aws_bedrock_agentcore",
-      "cloud.resource_id": "arn:aws:bedrock-agentcore:us-west-2:313117444016:runtime/...",
-      "aws.service.type": "gen_ai_agent",
-      "telemetry.sdk.name": "opentelemetry",
-      "telemetry.sdk.version": "1.33.1"
-    }
-  },
-  "traceId": "693450f70706ee542404439f03c99a12",
-  "spanId": "e6b23d1a2e6ddadc",
-  "parentSpanId": "ddd354c4fb6e4656",
-  "name": "chat us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-  "kind": "CLIENT",
-  "startTimeUnixNano": 1765036280876512050,
-  "endTimeUnixNano": 1765036282425105992,
-  "durationNano": 1548593942,
-  "attributes": {
-    "aws.remote.operation": "InvokeModel",
-    "gen_ai.request.model": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "gen_ai.request.max_tokens": 1024,
-    "gen_ai.request.temperature": 0.7,
-    "gen_ai.usage.input_tokens": 1086,
-    "gen_ai.usage.output_tokens": 65,
-    "gen_ai.response.finish_reasons": ["tool_use"],
-    "gen_ai.memory.id": "langgraph_agent_mem-o5nDQxAbkB",
-    "session.id": "test-token-stream-12345678901234567890",
-    "http.status_code": 200
-  },
-  "status": { "code": "UNSET" }
-}
+### Gap Analysis: Auto-Instrumentation vs. Required
+
+| Data Category | Auto-Captured by Gateway | Required for Evaluation | Gap |
+|---------------|-------------------------|------------------------|-----|
+| Token counts | Yes | No (optional) | None |
+| Latency/duration | Yes | No (optional) | None |
+| Tool names | Yes | Yes | None |
+| Session/trace IDs | Yes | Yes | None |
+| User query text | **Unknown** | **Yes** | Verify |
+| LLM response text | **Unknown** | **Yes** | Verify |
+| Retrieved documents | **Unknown** | **Yes** | Verify |
+| Metadata filters | **Unknown** | **Yes** | Verify |
+| User access context | **No** | **Yes** | Custom instrumentation required |
+
+### Recommendations
+
+1. **Deploy knowledgeDB to AgentCore Runtime** and verify actual trace content in CloudWatch
+2. **If content is missing**, add custom ADOT instrumentation:
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer("knowledgedb")
+
+@tracer.start_as_current_span("knowledge_base_retrieve")
+def retrieve_from_kb(query: str, filters: dict):
+    span = trace.get_current_span()
+    
+    # Capture input for evaluation
+    span.set_attribute("request.query", query)
+    span.set_attribute("request.filters", json.dumps(filters))
+    
+    # Execute retrieval
+    results = bedrock_kb.retrieve(query, filters)
+    
+    # Capture output for evaluation
+    span.set_attribute("response.document_count", len(results))
+    span.set_attribute("response.documents", json.dumps(results[:5]))  # Limit size
+    
+    return results
 ```
 
-### Key Fields for Evaluation
+3. **For access control context**, instrument the filter application:
 
-| Field | Location | Use in Evaluation |
-|-------|----------|-------------------|
-| `traceId` | Root | Correlate spans within a request |
-| `session.id` | `attributes` | Session-level evaluation scope |
-| `gen_ai.request.model` | `attributes` | Model performance comparison |
-| `gen_ai.usage.*` | `attributes` | Cost and efficiency metrics |
-| `gen_ai.response.finish_reasons` | `attributes` | Completion status analysis |
-| `durationNano` | Root | Latency monitoring |
-| `name` | Root | Operation identification |
-
-### Query Examples
-
-**Get recent traces:**
-```bash
-aws logs filter-log-events \
-  --log-group-name "aws/spans" \
-  --limit 10 \
-  --output json
-```
-
-**Filter by gen_ai operations:**
-```bash
-aws logs filter-log-events \
-  --log-group-name "aws/spans" \
-  --filter-pattern "gen_ai" \
-  --limit 10
+```python
+@tracer.start_as_current_span("apply_access_filter")
+def apply_access_filter(user_context: dict, query: str):
+    span = trace.get_current_span()
+    span.set_attribute("user.role", user_context.get("role"))
+    span.set_attribute("user.department", user_context.get("department"))
+    span.set_attribute("user.accessLevel", user_context.get("accessLevel"))
+    span.set_attribute("filters.applied", json.dumps(build_filters(user_context)))
+    # ... filter logic
 ```
 
 ---
